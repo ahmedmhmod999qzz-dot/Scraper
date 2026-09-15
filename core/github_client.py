@@ -7,7 +7,8 @@ from typing import Optional
 from config.settings import settings
 from utils.logger import logger
 
-
+# لغات مستهدفة — spam ليس له language
+DEFAULT_LANGUAGES = ["python", "javascript", "typescript", "go", "java", "php", "ruby", "rust", "c", "c++", "csharp"]
 GITHUB_API = "https://api.github.com"
 HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -24,17 +25,15 @@ async def search_recent_repos(
 ) -> list[dict]:
     """
     يبحث عن مستودعات أُنشئت أو حُدّثت خلال آخر N أيام.
-    يعيد قائمة موحدة من dicts.
+    يستبعد المستودعات بدون لغة (spam) افتراضيًا.
     """
     since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    langs = languages or DEFAULT_LANGUAGES
 
-    queries = [
-        f"created:>{since} sort:updated",
-        f"pushed:>{since} sort:updated",
-    ]
-
-    if languages:
-        queries = [f"{q} language:{lang}" for q in queries for lang in languages]
+    queries = []
+    for lang in langs:
+        queries.append(f"created:>{since} language:{lang} sort:updated")
+        queries.append(f"pushed:>{since} language:{lang} sort:updated")
 
     results: dict[str, dict] = {}
 
@@ -47,9 +46,8 @@ async def search_recent_repos(
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
-                    # سجّل حالة Rate Limit
                     remaining = resp.headers.get("X-RateLimit-Remaining", "?")
-                    logger.info(f"[GitHub] query='{query[:60]}' → HTTP {resp.status}, remaining={remaining}")
+                    logger.info(f"[GitHub] '{query[:70]}' → HTTP {resp.status}, remaining={remaining}")
 
                     if resp.status == 200:
                         data = await resp.json()
@@ -62,15 +60,13 @@ async def search_recent_repos(
                                     "html_url": item["html_url"],
                                     "language": item.get("language"),
                                     "stars": item.get("stargazers_count", 0),
+                                    "size_kb": item.get("size", 0),
                                     "created_at": item.get("created_at"),
                                     "updated_at": item.get("updated_at"),
-                                    "size_kb": item.get("size", 0),
                                 }
                     elif resp.status == 403:
                         logger.warning("[GitHub] Rate limit reached. Waiting 60s...")
                         await asyncio.sleep(60)
-                    elif resp.status == 422:
-                        logger.warning(f"[GitHub] Invalid query: {query[:80]}")
                     else:
                         body = await resp.text()
                         logger.error(f"[GitHub] HTTP {resp.status}: {body[:200]}")
