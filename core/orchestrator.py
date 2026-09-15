@@ -1,11 +1,11 @@
-
-"""core/orchestrator.py — العقل المنسّق بين كل الوحدات"""
+"""core/orchestrator.py — فلترة صارمة + استهلاك ذاكرة منخفض"""
 import asyncio
+import re
 import time
 
 from config.settings import settings
 from utils.logger import logger
-from utils.entropy import is_likely_secret
+from utils.entropy import is_likely_secret, calculate_entropy
 
 from core.github_client import search_recent_repos
 from core.gitleaks_runner import scan_repo_with_gitleaks
@@ -16,7 +16,96 @@ from core.notifier import notify_finding
 
 
 MIN_SIZE_KB = 10
-MAX_SIZE_KB = 50_000
+MAX_SIZE_KB = 30_000  # ← خُفّض من 50MB إلى 30MB
+
+# ═══ مسارات نتجاهلها كليًا ═══
+_IGNORED_PATH_PATTERNS = [
+    re.compile(r"(^|/)tests?/", re.I),
+    re.compile(r"(^|/)examples?/", re.I),
+    re.compile(r"(^|/)samples?/", re.I),
+    re.compile(r"(^|/)fixtures?/", re.I),
+    re.compile(r"(^|/)docs?/", re.I),
+    re.compile(r"\.md$", re.I),
+    re.compile(r"README", re.I),
+    re.compile(r"\.env\.example$", re.I),
+    re.compile(r"\.sample$", re.I),
+    re.compile(r"\.template$", re.I),
+    re.compile(r"\.lock$", re.I),        # package-lock.json, yarn.lock
+    re.compile(r"\.yaml$|\.yml$", re.I), # ← VPN configs, k8s configs
+    re.compile(r"clash|surge|v2ray|shadowsocks|trojan", re.I),
+    re.compile(r"\.json$", re.I),        # أغلبها configs
+    re.compile(r"\.min\.(js|css)$", re.I),
+    re.compile(r"\.map$", re.I),
+]
+
+# ═══ placeholders ═══
+_PLACEHOLDER_REGEX = re.compile(
+    r"(abc123|xyz|123456|test|demo|sample|example|dummy|fake|mock|"
+    r"placeholder|your[_-]|changeme|replace[_-]me|insert[_-]here|"
+    r"xxx+|yyy+|zzz+|foobar|foo_bar|redacted|"
+    r"api[_-]?key[_-]?here|secret[_-]?key[_-]?here)",
+    re.I,
+)
+
+# ═══ معرّفات ═══
+_CONTEXT_IDENTIFIERS = re.compile(
+    r"(dashboard|student|project|module|component|variable|const|"
+    r"label|title|route|path|index|placeholder|sample|demo)",
+    re.I,
+)
+
+_STRUCTURAL_FP = [
+    re.compile(r"^[a-z][a-z0-9_]*_v\d+(\.\d+)*$", re.I),
+    re.compile(r"_v\d+(\.\d+)*$", re.I),
+    re.compile(r"^[a-z]+_[a-z]+_[a-z]+$", re.I),
+    re.compile(r"^[a-z]+$"),
+    re.compile(r"^[A-Z_]+$"),
+    re.compile(r"^[A-Za-z0-9+/=]+$"),  # ← base64 مضاد
+]
+
+# ═══ قواعد صارمة للأنماط العامة ═══
+GENERIC_RULES = {"generic-api-key", "generic-api-token", "generic-secret", "generic-password"}
+GENERIC_MIN_LEN = 24       # ← رُفع من 20
+GENERIC_MIN_ENTROPY = 4.5  # ← رُفع من 4.0
+
+
+def is_ignored_path(file_path: str) -> bool:
+    if not file_path:
+        return False
+    return any(p.search(file_path) for p in _IGNORED_PATH_PATTERNS)
+
+
+def is_false_positive(secret: str, rule_id: str, file_path: str = "") -> bool:
+    if not secret:
+        return True
+
+    if is_ignored_path(file_path):
+        return True
+
+    s = secret.strip()
+    rule = (rule_id or "").lower()
+
+    if _PLACEHOLDER_REGEX.search(s):
+        return True
+
+    for pat in _STRUCTURAL_FP:
+        if pat.search(s):
+            return True
+
+    if _CONTEXT_IDENTIFIERS.search(s) and "_" in s and s.count("_") >= 2:
+        return True
+
+    if rule in GENERIC_RULES:
+        if len(s) < GENERIC_MIN_LEN:
+            return True
+        ent = calculate_entropy(s)
+        if ent < GENERIC_MIN_ENTROPY:
+            return True
+        # كله uppercase وحروف فقط = base64 مشبوه
+        if s.isupper() and s.isalpha():
+            return True
+
+    return False
 
 
 class Orchestrator:
@@ -37,65 +126,69 @@ class Orchestrator:
         clone_url = repo["clone_url"]
         size_kb = repo.get("size_kb", 0)
         language = repo.get("language", "?")
-        stars = repo.get("stars", 0)
 
         if storage.was_scanned(full_name, max_age_hours=24):
-            logger.debug(f"[Orch] {full_name} → فُحص مؤخرًا، تخطٍّ")
             return 0
 
-        logger.info(f"[Orch] ▶ فحص {full_name} ({size_kb/1024:.1f}MB, {language}, ⭐{stars})")
+        logger.info(f"[Orch] ▶ فحص {full_name} ({size_kb/1024:.1f}MB, {language})")
 
-        gl_task = asyncio.create_task(scan_repo_with_gitleaks(clone_url, full_name))
-        th_task = asyncio.create_task(
-            scan_repo_with_trufflehog(clone_url, full_name, only_verified=True)
-        )
-
-        gitleaks_findings, trufflehog_findings = await asyncio.gather(
-            gl_task, th_task, return_exceptions=True
-        )
-
-        if isinstance(gitleaks_findings, Exception):
-            logger.error(f"[Orch] Gitleaks فشل على {full_name}: {gitleaks_findings}")
+        # ═══ تسلسلي بدل متوازي (تخفيف ذاكرة) ═══
+        try:
+            gitleaks_findings = await scan_repo_with_gitleaks(clone_url, full_name)
+        except Exception as e:
+            logger.error(f"[Orch] Gitleaks فشل: {e}")
             gitleaks_findings = []
-        if isinstance(trufflehog_findings, Exception):
-            logger.error(f"[Orch] TruffleHog فشل على {full_name}: {trufflehog_findings}")
+
+        try:
+            trufflehog_findings = await scan_repo_with_trufflehog(
+                clone_url, full_name, only_verified=True
+            )
+        except Exception as e:
+            logger.error(f"[Orch] TruffleHog فشل: {e}")
             trufflehog_findings = []
 
         all_findings = list(gitleaks_findings) + list(trufflehog_findings)
 
         new_count = 0
+        rejected_fp = 0
         for f in all_findings:
-            preview = f.get("secret_raw", "") or f.get("secret_preview", "")
+            secret = f.get("secret_raw", "") or f.get("secret_preview", "")
+            rule_id = f.get("rule_id", "")
             source = f.get("source", "")
+            file_path = f.get("file", "")
 
-            if source == "gitleaks":
-                if len(preview) < 8:
-                    logger.debug(f"[Orch] استُبعد (قصير): {f.get('rule_id', '?')}")
-                    continue
-            else:
-                if not is_likely_secret(preview):
-                    logger.debug(f"[Orch] استُبعد بـ entropy: {f.get('rule_id', '?')}")
-                    continue
-
-            if not storage.is_new(f):
-                logger.debug(f"[Orch] مكرر: {f.get('rule_id', '?')}")
+            if is_false_positive(secret, rule_id, file_path):
+                rejected_fp += 1
                 continue
 
-            cvss = score_of(f.get("rule_id", ""), verified=f.get("verified", False))
+            if source == "gitleaks" and len(secret) < 8:
+                continue
+            if source != "gitleaks" and not is_likely_secret(secret):
+                continue
+
+            if not storage.is_new(f):
+                continue
+
+            cvss = score_of(rule_id, verified=f.get("verified", False))
             severity = severity_label(cvss)
             emoji = severity_emoji(cvss)
 
             storage.save(f, cvss)
             new_count += 1
 
-            try:
-                await notify_finding(f, cvss, severity, emoji)
-                await asyncio.sleep(1.2)
-            except Exception as e:
-                logger.error(f"[Orch] فشل إرسال التنبيه: {e}")
+            # ═══ أرسل فقط MEDIUM وما فوق ═══
+            if cvss >= 5.0:
+                try:
+                    await notify_finding(f, cvss, severity, emoji)
+                    await asyncio.sleep(1.5)
+                except Exception as e:
+                    logger.error(f"[Orch] فشل التنبيه: {e}")
 
         storage.mark_repo_scanned(full_name, len(all_findings))
-        logger.info(f"[Orch] ✓ {full_name} → {len(all_findings)} نتيجة ({new_count} جديدة)")
+        logger.info(
+            f"[Orch] ✓ {full_name} → {len(all_findings)} اكتشاف، "
+            f"{rejected_fp} FP، {new_count} جديد"
+        )
         return new_count
 
     async def scan_cycle(self) -> int:
@@ -113,34 +206,31 @@ class Orchestrator:
         rejected_small = 0
         rejected_big = 0
         for r in repos:
-            ok, reason = self._is_scannable(r)
+            ok, _ = self._is_scannable(r)
             if ok:
                 filtered.append(r)
-            elif "صغير" in reason:
-                rejected_small += 1
             else:
-                rejected_big += 1
+                if r.get("size_kb", 0) < MIN_SIZE_KB:
+                    rejected_small += 1
+                else:
+                    rejected_big += 1
 
         logger.info(
             f"[Orch] الفلترة: {len(filtered)} مقبول، "
-            f"{rejected_small} spam صغير، {rejected_big} كبير"
+            f"{rejected_small} صغير، {rejected_big} كبير"
         )
 
         if not filtered:
             return 0
 
-        sem = asyncio.Semaphore(settings.CONCURRENCY)
+        # ═══ تسلسلي تام (تخفيف ذاكرة) ═══
+        total_new = 0
+        for r in filtered:
+            try:
+                total_new += await self._scan_one_repo(r)
+            except Exception as e:
+                logger.exception(f"[Orch] استثناء: {e}")
 
-        async def _limited(r):
-            async with sem:
-                try:
-                    return await self._scan_one_repo(r)
-                except Exception as e:
-                    logger.exception(f"[Orch] استثناء في {r['full_name']}: {e}")
-                    return 0
-
-        results = await asyncio.gather(*[_limited(r) for r in filtered])
-        total_new = sum(results)
         cycle_duration = time.time() - cycle_start
         logger.info(
             f"[Orch] ═══ الدورة انتهت ═══ "
