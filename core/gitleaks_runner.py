@@ -1,5 +1,4 @@
-
-"""core/gitleaks_runner.py — تشغيل Gitleaks وقراءة نتائجه"""
+"""core/gitleaks_runner.py — تشغيل Gitleaks مع إعدادات مخصصة"""
 import asyncio
 import json
 import shutil
@@ -35,7 +34,7 @@ async def _clone_repo(clone_url: str, dest: str) -> bool:
 
 
 async def scan_repo_with_gitleaks(clone_url: str, repo_name: str) -> list[dict]:
-    """يستنسخ، يشغّل Gitleaks، يعيد نتائج موحدة مع المفتاح الكامل."""
+    """يستنسخ، يشغّل Gitleaks مع إعدادات مخصصة، يعيد نتائج موحدة."""
     tmpdir = tempfile.mkdtemp(prefix="hunter_gl_")
     repo_path = Path(tmpdir) / "repo"
     report_path = Path(tmpdir) / "report.json"
@@ -51,8 +50,14 @@ async def scan_repo_with_gitleaks(clone_url: str, repo_name: str) -> list[dict]:
             "--report-path", str(report_path),
             "--no-banner",
             "--exit-code", "0",
-            # ✅ لا --redact ولا --no-redact
         ]
+
+        # ═══ استخدم الإعدادات المخصصة إن وُجدت ═══
+        config_path = Path("/app/.gitleaks.toml")
+        if config_path.exists():
+            cmd.extend(["--config", str(config_path)])
+            logger.debug(f"[Gitleaks] استخدام {config_path}")
+
         stdout, stderr, code = await _run_cmd(cmd, timeout=180)
 
         if code not in (0, 1):
