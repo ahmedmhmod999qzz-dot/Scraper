@@ -47,7 +47,8 @@ class Storage:
     @staticmethod
     def _hash_finding(finding: dict) -> str:
         """بصمة فريدة لكل سر — نفس المفتاح في مستودعين = نفس البصمة."""
-        key = f"{finding.get('rule_id','')}:{finding.get('secret_preview','')}"
+        secret = finding.get('secret_raw', '') or finding.get('secret_preview', '')
+        key = f"{finding.get('rule_id','')}:{secret}"
         return hashlib.sha256(key.encode()).hexdigest()
 
     def is_new(self, finding: dict) -> bool:
