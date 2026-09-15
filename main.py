@@ -1,6 +1,6 @@
-
-"""main.py — نقطة دخول The Hunter (خادم ويب + فحص في الخلفية)"""
+"""main.py — نقطة دخول The Hunter (خفيف على الذاكرة)"""
 import asyncio
+import os
 import sys
 import threading
 
@@ -9,19 +9,31 @@ from utils.logger import logger
 from core.orchestrator import Orchestrator
 from core.bot_handler import bot
 from core.storage import storage
+from core.notifier import send_message
 from web import run_web
 
 
-CYCLE_INTERVAL_SECONDS = 300
+CYCLE_INTERVAL_SECONDS = int(os.environ.get("CYCLE_INTERVAL", "300"))
 
 
 async def scanner_loop():
     orchestrator = Orchestrator()
+    # إشعار بدء
+    try:
+        stats = storage.stats()
+        await send_message(
+            f"🟢 *The Hunter استُبدئ*\n\n"
+            f"📦 مستودعات سابقة: `{stats['repos_scanned']}`\n"
+            f"🔑 نتائج مخزنة: `{stats['total_findings']}`"
+        )
+    except Exception:
+        pass
+
     while True:
         try:
             logger.info("[Main] بدء دورة جديدة...")
             new = await orchestrator.scan_cycle()
-            logger.info(f"[Main] الدورة انتهت ({new} جديدة). انتظار {CYCLE_INTERVAL_SECONDS}s...")
+            logger.info(f"[Main] الدورة انتهت ({new} جديدة)")
         except Exception as e:
             logger.exception(f"[Main] خطأ في الدورة: {e}")
         await asyncio.sleep(CYCLE_INTERVAL_SECONDS)
@@ -53,5 +65,5 @@ def run_async_in_thread():
 if __name__ == "__main__":
     worker = threading.Thread(target=run_async_in_thread, daemon=True)
     worker.start()
-    logger.info("[Main] بدء خادم الويب على المنفذ المحدد...")
+    logger.info("[Main] بدء خادم الويب...")
     run_web()
