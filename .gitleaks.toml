@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════════════════════════
+#  .gitleaks.toml — The Hunter Custom Config
+#  فلترة مسبقة للإيجابيات الكاذبة
+# ═══════════════════════════════════════════════════════════
+
+title = "The Hunter"
+
+[extend]
+useDefault = true
+
+# ═══ قائمة سماح عامة ═══
+[[allowlists]]
+description = "Global false positive filter"
+paths = [
+    '''tests?/.*''',
+    '''.*[._]test\.(py|js|ts|go|java|rb|php|dart)$''',
+    '''.*\.test\.(js|ts)$''',
+    '''examples?/.*''',
+    '''samples?/.*''',
+    '''fixtures?/.*''',
+    '''mocks?/.*''',
+    '''docs?/.*''',
+    '''.*\.md$''',
+    '''README.*''',
+    '''.*\.env\.example$''',
+    '''.*\.sample$''',
+    '''.*\.template$''',
+    '''.*\.lock$''',
+    '''.*\.yaml$''',
+    '''.*\.yml$''',
+    '''.*\.min\.(js|css)$''',
+    '''.*\.map$''',
+    '''clash.*''',
+    '''v2ray.*''',
+    '''shadowsocks.*''',
+]
+regexes = [
+    '''(?i)(example|sample|dummy|fake|placeholder|redacted|changeme)''',
+    '''(?i)(abc123|xyz789|123456|foobar)''',
+    '''(?i)your[_-]?(api|secret|token)[_-]?key''',
+    '''REDACTED''',
+    '''sk-live-abc123''',
+]
+stopwords = [
+    "example", "sample", "dummy", "fake",
+    "placeholder", "redacted", "changeme",
+]
