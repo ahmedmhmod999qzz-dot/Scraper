@@ -12,12 +12,27 @@ from core.gitleaks_runner import scan_repo_with_gitleaks
 from core.trufflehog_runner import scan_repo_with_trufflehog
 from core.cvss import score_of, severity_label, severity_emoji
 from core.storage import storage
-from core.notifier import notify_finding, notify_heartbeat
+from core.notifier import notify_finding
+
+
+# ═══ حدود الحجم (KB) ═══
+MIN_SIZE_KB = 10         # استبعاد spam الفارغ
+MAX_SIZE_KB = 50_000     # استبعاد المشاريع الضخمة (> 50 MB)
 
 
 class Orchestrator:
     def __init__(self):
         self.last_heartbeat = time.time()
+
+    @staticmethod
+    def _is_scannable(repo: dict) -> tuple[bool, str]:
+        """يفحص إن كان المستودع يستحق الفحص. يعيد (نعم/لا، السبب)."""
+        size = repo.get("size_kb", 0)
+        if size < MIN_SIZE_KB:
+            return False, f"صغير ({size}KB)"
+        if size > MAX_SIZE_KB:
+            return False, f"كبير ({size}KB > {MAX_SIZE_KB}KB)"
+        return True, ""
 
     async def _scan_one_repo(self, repo: dict) -> int:
         """يفحص مستودعًا واحدًا بالكامل. يعيد عدد الاكتشافات الجديدة."""
@@ -27,17 +42,15 @@ class Orchestrator:
         language = repo.get("language", "?")
         stars = repo.get("stars", 0)
 
-        # ═══ فلترة spam ═══
-        if size_kb < 10:
-            logger.debug(f"[Orch] {full_name} → حجم صغير ({size_kb}KB)، تخطٍّ")
-            return 0
-
         # تجاوز إذا فُحص حديثًا
         if storage.was_scanned(full_name, max_age_hours=24):
             logger.debug(f"[Orch] {full_name} → فُحص مؤخرًا، تخطٍّ")
             return 0
 
-        logger.info(f"[Orch] ▶ فحص {full_name} ({size_kb}KB, {language}, ⭐{stars})")
+        logger.info(
+            f"[Orch] ▶ فحص {full_name} "
+            f"({size_kb/1024:.1f}MB, {language}, ⭐{stars})"
+        )
 
         # ═══ 1. شغّل Gitleaks و TruffleHog بالتوازي ═══
         gl_task = asyncio.create_task(scan_repo_with_gitleaks(clone_url, full_name))
@@ -62,10 +75,20 @@ class Orchestrator:
         new_count = 0
         for f in all_findings:
             preview = f.get("secret_preview", "")
-            if not is_likely_secret(preview):
-                logger.debug(f"[Orch] استُبعد بـ entropy: {f.get('rule_id', '?')}")
-                continue
+            source = f.get("source", "")
 
+            # Gitleaks متخصص — نثق به، نتحقق فقط من الطول
+            if source == "gitleaks":
+                if len(preview) < 8:
+                    logger.debug(f"[Orch] استُبعد (قصير): {f.get('rule_id', '?')}")
+                    continue
+            else:
+                # TruffleHog والبقية → entropy
+                if not is_likely_secret(preview):
+                    logger.debug(f"[Orch] استُبعد بـ entropy: {f.get('rule_id', '?')}")
+                    continue
+
+            # منع التكرار
             if not storage.is_new(f):
                 logger.debug(f"[Orch] مكرر: {f.get('rule_id', '?')}")
                 continue
@@ -81,7 +104,7 @@ class Orchestrator:
             # أرسل تنبيه
             try:
                 await notify_finding(f, cvss, severity, emoji)
-                await asyncio.sleep(1.2)  # تجنب flood limits في Telegram
+                await asyncio.sleep(1.2)  # تجنب flood limits
             except Exception as e:
                 logger.error(f"[Orch] فشل إرسال التنبيه: {e}")
 
@@ -104,14 +127,26 @@ class Orchestrator:
             logger.info("[Orch] لا مستودعات جديدة في هذه الدورة")
             return 0
 
-        # ═══ 2. فلترة أولية للمستودعات (spam) ═══
-        filtered = [r for r in repos if r.get("size_kb", 0) >= 10]
-        skipped = len(repos) - len(filtered)
-        if skipped:
-            logger.info(f"[Orch] استُبعد {skipped} مستودع spam صغير الحجم")
+        # ═══ 2. فلترة الحجم ═══
+        filtered = []
+        rejected_small = 0
+        rejected_big = 0
+        for r in repos:
+            ok, reason = self._is_scannable(r)
+            if ok:
+                filtered.append(r)
+            elif "صغير" in reason:
+                rejected_small += 1
+            else:
+                rejected_big += 1
+
+        logger.info(
+            f"[Orch] الفلترة: {len(filtered)} مقبول، "
+            f"{rejected_small} spam صغير، {rejected_big} كبير جدًا"
+        )
 
         if not filtered:
-            logger.info("[Orch] كل المستودعات spam — لا شيء لفحصه")
+            logger.info("[Orch] لا مستودعات صالحة للفحص")
             return 0
 
         # ═══ 3. افحص بالتوازي المحدود ═══
@@ -131,17 +166,8 @@ class Orchestrator:
         cycle_duration = time.time() - cycle_start
         logger.info(
             f"[Orch] ═══ الدورة انتهت ═══ "
-            f"مستودعات={len(filtered)} (+{skipped} spam)، "
+            f"مفحوص={len(filtered)}، "
             f"جديدة={total_new}، مدة={cycle_duration:.1f}s"
         )
-
-        # ═══ 4. Heartbeat دوري ═══
-        if time.time() - self.last_heartbeat >= settings.HEARTBEAT_MINUTES * 60:
-            stats = storage.stats()
-            try:
-                await notify_heartbeat(stats, cycle_duration)
-            except Exception as e:
-                logger.error(f"[Orch] Heartbeat فشل: {e}")
-            self.last_heartbeat = time.time()
 
         return total_new
