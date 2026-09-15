@@ -1,13 +1,10 @@
+
 FROM python:3.12-slim
 
-# ═══ أدوات النظام ═══
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    curl \
-    ca-certificates \
+    git curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# ═══ Gitleaks ═══
 ARG GITLEAKS_VERSION=8.28.0
 RUN curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
     -o /tmp/gitleaks.tar.gz \
@@ -15,7 +12,6 @@ RUN curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAK
     && chmod +x /usr/local/bin/gitleaks \
     && rm /tmp/gitleaks.tar.gz
 
-# ═══ TruffleHog ═══
 ARG TRUFFLEHOG_VERSION=3.82.5
 RUN curl -sSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" \
     -o /tmp/th.tar.gz \
@@ -23,13 +19,13 @@ RUN curl -sSL "https://github.com/trufflesecurity/trufflehog/releases/download/v
     && chmod +x /usr/local/bin/trufflehog \
     && rm /tmp/th.tar.gz
 
-# ═══ Python dependencies ═══
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ═══ نسخ المشروع ═══
 COPY . .
 
-# ═══ تشغيل ═══
+EXPOSE 8080
 CMD ["python", "-u", "main.py"]
+
+
