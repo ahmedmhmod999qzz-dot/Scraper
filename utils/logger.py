@@ -7,7 +7,7 @@ from config.settings import settings
 def setup_logger(name: str = "hunter", level: int = logging.INFO) -> logging.Logger:
     """ينشئ Logger موحدًا يكتب في stdout (Render) وفي ملف."""
     logger = logging.getLogger(name)
-    if logger.handlers:          # تجنب إضافة معالجات مكررة
+    if logger.handlers:
         return logger
 
     logger.setLevel(level)
@@ -21,7 +21,8 @@ def setup_logger(name: str = "hunter", level: int = logging.INFO) -> logging.Log
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
-    # ملف — يبقى حتى لو أُعيد تشغيل الخدمة
+    # ملف — أنشئ المجلد أولاً إن لم يكن موجودًا
+    settings.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(settings.LOGS_DIR / f"{name}.log", encoding="utf-8")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
