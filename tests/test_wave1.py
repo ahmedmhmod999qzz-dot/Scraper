@@ -1,4 +1,17 @@
 """tests/test_wave1.py — اختبار الموجة 1"""
+import sys
+from pathlib import Path
+
+# أضف جذر المشروع إلى مسار البحث
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config.settings import settings
+from utils.logger import logger
+from utils.entropy import calculate_entropy, is_likely_secret
+
+# ... باقي الكود كما هو
+
+"""tests/test_wave1.py — اختبار الموجة 1"""
 from config.settings import settings
 from utils.logger import logger
 from utils.entropy import calculate_entropy, is_likely_secret
