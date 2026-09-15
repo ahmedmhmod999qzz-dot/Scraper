@@ -44,23 +44,16 @@ async def scan_repo_with_gitleaks(clone_url: str, repo_name: str) -> list[dict]:
         if not await _clone_repo(clone_url, str(repo_path)):
             return []
 
-        # ═══ أمر Gitleaks — بدون إخفاء ═══
         cmd = [
             "gitleaks", "detect",
             "--source", str(repo_path),
             "--report-format", "json",
             "--report-path", str(report_path),
             "--no-banner",
-            "--no-redact",           # ← المفتاح! يمنع الإخفاء
             "--exit-code", "0",
+            # ✅ لا --redact ولا --no-redact
         ]
         stdout, stderr, code = await _run_cmd(cmd, timeout=180)
-
-        # إذا رفض الإصدار --no-redact، جرب بدونها
-        if code not in (0, 1) and "no-redact" in stderr.lower():
-            logger.warning("[Gitleaks] --no-redact غير مدعوم، محاولة بدونه")
-            cmd = [c for c in cmd if c != "--no-redact"]
-            stdout, stderr, code = await _run_cmd(cmd, timeout=180)
 
         if code not in (0, 1):
             logger.warning(f"[Gitleaks] {repo_name} → exit={code}: {stderr[:200]}")
@@ -83,8 +76,8 @@ async def scan_repo_with_gitleaks(clone_url: str, repo_name: str) -> list[dict]:
                 "description": item.get("Description", ""),
                 "file": item.get("File", ""),
                 "line": item.get("StartLine", 0),
-                "secret_raw": secret,                # ← القيمة الكاملة
-                "secret_preview": secret,            # للتوافق
+                "secret_raw": secret,
+                "secret_preview": secret,
                 "secret_len": len(secret),
                 "commit": item.get("Commit", ""),
                 "author": item.get("Author", ""),
