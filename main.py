@@ -1,20 +1,21 @@
 
-"""main.py — نقطة دخول The Hunter"""
+"""main.py — نقطة دخول The Hunter (خادم ويب + فحص في الخلفية)"""
 import asyncio
 import sys
+import threading
 
 from config.settings import settings
 from utils.logger import logger
 from core.orchestrator import Orchestrator
 from core.bot_handler import bot
 from core.storage import storage
+from web import run_web
 
 
 CYCLE_INTERVAL_SECONDS = 300
 
 
 async def scanner_loop():
-    """حلقة الفحص في الخلفية."""
     orchestrator = Orchestrator()
     while True:
         try:
@@ -26,7 +27,7 @@ async def scanner_loop():
         await asyncio.sleep(CYCLE_INTERVAL_SECONDS)
 
 
-async def main():
+async def async_main():
     logger.info("╔" + "═" * 60 + "╗")
     logger.info("║           The Hunter — GitHub Secret Scanner            ║")
     logger.info("╚" + "═" * 60 + "╝")
@@ -37,15 +38,20 @@ async def main():
         logger.error(str(e))
         sys.exit(1)
 
-    # شغّل الفحص والبوت معًا
     await asyncio.gather(
         scanner_loop(),
         bot.poll_loop(),
     )
 
 
+def run_async_in_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(async_main())
+
+
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("[Main] إيقاف يدوي")
+    worker = threading.Thread(target=run_async_in_thread, daemon=True)
+    worker.start()
+    logger.info("[Main] بدء خادم الويب على المنفذ المحدد...")
+    run_web()
