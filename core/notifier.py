@@ -1,5 +1,5 @@
 
-"""core/notifier.py — إرسال تنبيهات Telegram منسقة مع المفتاح الكامل"""
+"""core/notifier.py — إرسال تنبيهات Telegram مع سر قابل للنسخ بضغطة"""
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -9,6 +9,13 @@ from utils.logger import logger
 
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+def _sanitize_for_inline(s: str) -> str:
+    """يُزيل backticks حتى لا يكسر التنسيق."""
+    if not s:
+        return ""
+    return s.replace("`", "'").strip()
 
 
 async def send_message(text: str, markdown: bool = True, keyboard: dict | None = None) -> bool:
@@ -45,12 +52,12 @@ async def send_message(text: str, markdown: bool = True, keyboard: dict | None =
 
 
 async def notify_finding(finding: dict, cvss: float, severity: str, emoji: str):
-    """يرسل تنبيها منسقًا لسر مكتشف مع المفتاح الكامل."""
+    """يرسل تنبيها منسقًا مع المفتاح الكامل قابلًا للنسخ بضغطة."""
     repo = finding.get("repo", "?")
     rule = finding.get("rule_id", "?")
     file_path = finding.get("file", "?")
     line = finding.get("line", 0)
-    preview = finding.get("secret_raw", "") or finding.get("secret_preview", "")
+    secret = finding.get("secret_raw", "") or finding.get("secret_preview", "")
     verified = finding.get("verified", False)
     source = finding.get("source", "?")
     commit = finding.get("commit", "")
@@ -64,13 +71,13 @@ async def notify_finding(finding: dict, cvss: float, severity: str, emoji: str):
     else:
         commit_link = "_غير متاح_"
 
-    # ═══ الرسالة الرئيسية ═══
-    text = (
+    # ═══ الرسالة الرئيسية: تفاصيل الاكتشاف ═══
+    main_text = (
         f"{emoji} *{severity}* — CVSS `{cvss:.1f}`\n"
         f"{verified_badge}\n"
-        f"🔑 *النوع:* `{rule}`\n"
-        f"📦 *المستودع:* `{repo}`\n"
-        f"📄 *الملف:* `{file_path}`"
+        f"🔑 *النوع:* `{_sanitize_for_inline(rule)}`\n"
+        f"📦 *المستودع:* `{_sanitize_for_inline(repo)}`\n"
+        f"📄 *الملف:* `{_sanitize_for_inline(file_path)}`"
         f"{f' (سطر {line})' if line else ''}\n"
         f"🔍 *الكاشف:* `{source}`\n"
         f"🔒 *الحالة:* {status_icon}\n"
@@ -78,14 +85,18 @@ async def notify_finding(finding: dict, cvss: float, severity: str, emoji: str):
         f"🌿 *Commit:* {commit_link}\n"
         f"⏰ `{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}`"
     )
-    await send_message(text)
+    await send_message(main_text)
 
-    # ═══ رسالة منفصلة: المفتاح الكامل (في code block للنسخ) ═══
-    if preview:
-        secret_msg = (
-            f"🔐 *المفتاح الكامل* — `{repo}`\n"
-            f"`{rule}`\n\n"
-            f"```\n{preview}\n```\n"
-            f"👇 اضغط مطولًا للنسخ"
+    # ═══ الرسالة الثانية: السر فقط (قابل للنسخ بضغطة) ═══
+    if secret:
+        safe_secret = _sanitize_for_inline(secret)
+        # إذا كان السر طويلًا جدًا، نقسمه
+        if len(safe_secret) > 3500:
+            safe_secret = safe_secret[:3500] + "... [مقطوع]"
+
+        secret_text = (
+            f"🔐 *المفتاح الكامل* — `{_sanitize_for_inline(repo)}`\n\n"
+            f"`{safe_secret}`\n\n"
+            f"👆 *اضغط على النص أعلاه لنسخه*"
         )
-        await send_message(secret_msg)
+        await send_message(secret_text)
